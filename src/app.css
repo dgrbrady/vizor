@@ -1,1 +1,16 @@
-@import 'tailwindcss';
+@import "@xyflow/svelte/dist/style.css";
+@import "tailwindcss";
+
+.svelte-flow {
+	--xy-node-color: #111;
+}
+
+.current-node {
+	@apply rounded-xl border-4 border-purple-600 bg-purple-100 p-4 text-lg font-semibold text-black shadow-2xl;
+}
+.child-directory {
+	@apply cursor-pointer rounded-lg border-2 border-blue-500 bg-blue-100 p-3 text-black shadow-lg transition-all hover:border-blue-700 hover:shadow-xl;
+}
+.child-file {
+	@apply rounded-lg border-2 border-green-500 bg-green-100 p-3 text-black shadow-md transition-all hover:shadow-lg;
+}

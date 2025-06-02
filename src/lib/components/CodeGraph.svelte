@@ -1,10 +1,10 @@
 <script lang="ts">
-	import '@xyflow/svelte/dist/style.css';
-	import { SvelteFlow, Position, MarkerType, Background } from '@xyflow/svelte';
-	import type { Node, Edge } from '@xyflow/svelte';
+	import { SvelteFlow, MarkerType, Background, useSvelteFlow } from '@xyflow/svelte';
+	import type { Node, Edge, NodeEventWithPointer } from '@xyflow/svelte';
+	// import '@xyflow/svelte/dist/style.css';
+	import { untrack } from 'svelte';
 
 	// --- Interfaces based on Data_Model.md / tsAnalysisService.ts output ---
-	// These should ideally be in a shared types file, e.g., $lib/types/project.ts
 	interface FileNodeData {
 		id: string;
 		name: string;
@@ -38,148 +38,288 @@
 	}
 
 	// --- Component State using Svelte 5 Runes ---
-	let nodes = $state.raw<Node[]>([]);
-	let edges = $state.raw<Edge[]>([]);
+	let fullProjectData = $state<ProjectStructureData | null>(null);
+	let currentDirectoryId = $state<string | null>(null);
 	let isLoading = $state(true);
 	let error = $state<string | null>(null);
 
-	// --- Data Fetching and Processing ---
-	$effect(() => {
-		// This effect will run once after the component is first rendered, similar to onMount for initial data load.
-		// If projectPath were a reactive prop, this effect would re-run when it changes.
-		async function fetchData() {
-			isLoading = true;
-			error = null;
-			try {
-				// The User needs to ensure this API endpoint is working and serves ProjectStructureData.
-				// For now, using a hardcoded example path for the API call.
-				const response = await fetch('/api/project-structure?projectPath=./test-project');
-				if (!response.ok) {
-					throw new Error(`Failed to fetch project structure: ${response.statusText}`);
-				}
-				const projectData: ProjectStructureData = await response.json();
-				transformDataToGraph(projectData);
-			} catch (e: any) {
-				console.error('Error fetching project structure:', e);
-				error = e.message || 'An unknown error occurred.';
-			} finally {
-				isLoading = false;
+	const { fitView } = useSvelteFlow();
+	async function fetchData() {
+		isLoading = true;
+		error = null;
+		try {
+			// Using provided sample JSON directly for now.
+			// Replace with actual fetch call when API is ready.
+			const response = await fetch('/api/project-structure?projectPath=./test-project');
+			if (!response.ok) {
+				throw new Error(`Failed to fetch project structure: ${response.statusText}`);
 			}
+			const projectData: ProjectStructureData = await response.json();
+			if (!projectData || !projectData.rootDirectory) {
+				throw new Error('Project data or root directory is missing.');
+			}
+			fullProjectData = projectData;
+			currentDirectoryId = projectData.rootDirectory.id; // Start at root
+		} catch (e: any) {
+			console.error('Error fetching or processing project structure:', e);
+			error = e.message || 'An unknown error occurred.';
+			fullProjectData = null;
+			currentDirectoryId = null;
+		} finally {
+			isLoading = false;
 		}
+	}
 
-		fetchData();
+	// --- Data Fetching ---
+	// $effect(() => {
+	//
+	// 	fetchData();
+	// });
 
-		return () => {
-			// Cleanup logic if needed when the component is destroyed or effect re-runs
-			// For a simple one-time fetch, this might not be necessary
-		};
-	});
+	// --- Helper function to find a directory by ID in the full structure ---
+	function findDirectoryById(dir: DirectoryNodeData | null, id: string): DirectoryNodeData | null {
+		if (!dir) return null;
+		if (dir.id === id) return dir;
+		for (const childDir of dir.childDirectoryNodes) {
+			const found = findDirectoryById(childDir, id);
+			if (found) return found;
+		}
+		return null;
+	}
 
-	function transformDataToGraph(projectData: ProjectStructureData | null) {
-		if (!projectData) {
+	// --- Reactive generation of nodes and edges for the current view ---
+	function generateGraphForCurrentView(
+		projectData: ProjectStructureData | null,
+		currentDirId: string | null
+	) {
+		if (!projectData || !currentDirId) {
 			nodes = [];
 			edges = [];
 			return;
+			// return { nodes: [], edges: [] };
+		}
+
+		const currentDirectory = findDirectoryById(projectData.rootDirectory, currentDirId);
+		if (!currentDirectory) {
+			console.error(`Directory with ID ${currentDirId} not found in project data.`);
+			// Attempt to reset to root if current is somehow invalid and not root
+			if (currentDirId !== projectData.rootDirectory.id) {
+				console.warn(`Attempting to reset view to root directory.`);
+				// This assignment within a derived-like function is tricky.
+				// It's better to handle this upstream or ensure currentDirId is always valid.
+				// For now, returning empty graph for invalid currentDirId.
+			}
+			nodes = [];
+			edges = [];
+			return; //{ nodes: [], edges: [] };
 		}
 
 		const newNodes: Node[] = [];
 		const newEdges: Edge[] = [];
-		let yOffset = 0;
-		const xSpacing = 200;
-		const ySpacing = 100;
+		const xSpacing = 210; // Increased spacing
+		const ySpacing = 150; // Increased spacing for better readability
 
-		function processDirectory(
-			dir: DirectoryNodeData,
-			parentNodeId: string | null,
-			currentX: number,
-			depth: number
-		) {
+		// Add the current directory node (parent)
+		newNodes.push({
+			id: currentDirectory.id,
+			// type: 'default',
+			data: {
+				label: `${currentDirectory.name}`,
+				type: 'directory',
+				isCurrent: true,
+				path: currentDirectory.path
+			},
+			position: { x: 0, y: 0 }, // Centered
+			class: 'current-node',
+			style: 'width: 200px; text-align: center;'
+		});
+
+		const children = [...currentDirectory.childDirectoryNodes, ...currentDirectory.childFileNodes];
+		const totalChildren = children.length;
+		let currentX = -((totalChildren - 1) * xSpacing) / 2; // Calculate starting X to center children
+
+		// Process child directories
+		currentDirectory.childDirectoryNodes.forEach((childDir) => {
 			newNodes.push({
-				id: dir.id,
-				type: 'default',
-				data: { label: dir.name, type: 'directory' },
-				position: { x: currentX, y: yOffset },
-				sourcePosition: Position.Right,
-				targetPosition: Position.Left,
-				class: 'border-2 border-blue-500 bg-blue-100 p-2 rounded-md shadow-lg',
-				style: 'width: 150px; text-align: center;'
+				id: childDir.id,
+				// type: 'default',
+				data: {
+					label: childDir.name,
+					type: 'directory',
+					parentId: currentDirectory.id,
+					path: childDir.path
+				},
+				position: { x: currentX, y: ySpacing },
+				class: 'child-directory',
+				style: 'width: 180px; text-align: center; font-medium'
 			});
-			yOffset += ySpacing;
-
-			if (parentNodeId && dir.parentId === parentNodeId) {
-				// Check if dir.parentId matches the processing parent's ID
-				// This condition was `if (dir.parentId)` before.
-				// For the root node, `dir.parentId` is `null`. `parentNodeId` would also be `null` in the initial call.
-				// The crucial part is `dir.parentId` being the ID of the actual parent node in the graph.
-				// So, an edge is from `dir.parentId` to `dir.id`.
-				if (dir.parentId) {
-					// Ensures we only create edges for non-root directories to their explicit parents
-					newEdges.push({
-						id: `e-${dir.parentId}-${dir.id}`,
-						source: dir.parentId,
-						target: dir.id,
-						markerEnd: { type: MarkerType.ArrowClosed }
-					});
-				}
-			}
-
-			let childXOffset =
-				currentX -
-				((dir.childDirectoryNodes.length + dir.childFileNodes.length - 1) * xSpacing) / 2;
-
-			dir.childDirectoryNodes.forEach((childDir) => {
-				processDirectory(childDir, dir.id, childXOffset, depth + 1);
-				childXOffset += xSpacing;
+			newEdges.push({
+				id: `e-${currentDirectory.id}-${childDir.id}`,
+				source: currentDirectory.id,
+				target: childDir.id,
+				markerEnd: { type: MarkerType.ArrowClosed },
+				style: 'stroke-width: 2; stroke: #9ca3af;' // gray-400
 			});
+			currentX += xSpacing;
+		});
 
-			const initialFileYOffset = yOffset; // Store yOffset before processing files to align them horizontally if needed
-
-			dir.childFileNodes.forEach((file) => {
-				newNodes.push({
-					id: file.id,
-					type: 'default',
-					data: { label: file.name, type: 'file' },
-					position: { x: childXOffset, y: initialFileYOffset },
-					sourcePosition: Position.Right,
-					targetPosition: Position.Left,
-					class: 'border-2 border-green-500 bg-green-100 p-2 rounded-md shadow',
-					style: 'width: 150px; text-align: center;'
-				});
-				newEdges.push({
-					id: `e-${dir.id}-${file.id}`,
-					source: dir.id,
-					target: file.id,
-					markerEnd: { type: MarkerType.ArrowClosed }
-				});
-				childXOffset += xSpacing;
+		// Process child files
+		currentDirectory.childFileNodes.forEach((file) => {
+			newNodes.push({
+				id: file.id,
+				// type: 'default',
+				data: { label: file.name, type: 'file', parentId: currentDirectory.id, path: file.path },
+				position: { x: currentX, y: ySpacing },
+				class: 'child-file',
+				style: 'width: 180px; text-align: center;'
 			});
-			if (dir.childFileNodes.length > 0) {
-				yOffset = initialFileYOffset + ySpacing; // Move yOffset down after all files in the current directory are placed
-			}
-		}
+			newEdges.push({
+				id: `e-${currentDirectory.id}-${file.id}`,
+				source: currentDirectory.id,
+				target: file.id,
+				markerEnd: { type: MarkerType.ArrowClosed },
+				style: 'stroke-width: 2; stroke: #9ca3af;' // gray-400
+			});
+			currentX += xSpacing;
+		});
 
-		if (projectData.rootDirectory) {
-			processDirectory(projectData.rootDirectory, null, 0, 0);
-		}
-
-		// Update $state variables
 		nodes = newNodes;
 		edges = newEdges;
 	}
+
+	// Svelte 5 derived state for graph elements
+	let nodes: Node[] = $state.raw([]);
+	let edges: Edge[] = $state.raw([]);
+
+	$effect(() => {
+		fetchData();
+	});
+
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		[fullProjectData, currentDirectoryId];
+		untrack(() => {
+			generateGraphForCurrentView(fullProjectData, currentDirectoryId);
+			fitView({ padding: '50px', duration: 100 });
+		});
+	});
+
+	// --- Event Handlers ---
+	const onNodeClick: NodeEventWithPointer<MouseEvent | TouchEvent, Node> = (event) => {
+		const node = event.node;
+		if (node.data?.type === 'directory') {
+			// Check if it's not the current directory to avoid redundant updates
+			// or if it is current, it means we might want to "re-focus" (though not strictly needed here)
+			if (node.id !== currentDirectoryId) {
+				// Check if the clicked directory exists in the full project data
+				const clickedDirData = findDirectoryById(fullProjectData!.rootDirectory, node.id);
+				if (clickedDirData) {
+					currentDirectoryId = node.id;
+				} else {
+					console.warn(`Clicked directory ${node.id} not found in full data. Ignoring click.`);
+				}
+			}
+		}
+		// Optionally, handle file clicks here (e.g., show info panel)
+		// console.log('Clicked node:', node.data?.label, 'Type:', node.data?.type);
+	};
+
+	function goUp() {
+		if (!fullProjectData || !currentDirectoryId || !fullProjectData.rootDirectory) {
+			return;
+		}
+		if (currentDirectoryId === fullProjectData.rootDirectory.id) {
+			return; // Already at root
+		}
+
+		const currentDirData = findDirectoryById(fullProjectData.rootDirectory, currentDirectoryId);
+		if (currentDirData && currentDirData.parentId) {
+			currentDirectoryId = currentDirData.parentId;
+		} else if (currentDirData && !currentDirData.parentId) {
+			// Should be root, but if somehow parentId is null for a non-root, go to actual root.
+			currentDirectoryId = fullProjectData.rootDirectory.id;
+		}
+	}
+
+	const isNotRoot = $derived(
+		fullProjectData !== null &&
+			currentDirectoryId !== null &&
+			fullProjectData.rootDirectory !== null &&
+			currentDirectoryId !== fullProjectData.rootDirectory.id
+	);
+
+	const currentPathDisplay = $derived.by(() => {
+		if (!fullProjectData || !currentDirectoryId) return 'Loading path...';
+		const dir = findDirectoryById(fullProjectData.rootDirectory, currentDirectoryId);
+		return dir
+			? dir.path
+				? `${fullProjectData.name}/${dir.path}`
+				: fullProjectData.name
+			: 'Unknown Path';
+	});
 </script>
 
-<div style="height: 100vh; width: 100%;" class="bg-gray-50">
+<div id="code-graph" style="height: 100vh; width: 100%;" class="relative bg-gray-800 text-white">
 	{#if isLoading}
-		<p class="p-4 text-center text-gray-500">Loading project structure...</p>
+		<p class="p-6 text-center text-xl text-gray-400">Loading project structure...</p>
 	{:else if error}
-		<p class="p-4 text-center text-red-500">Error: {error}</p>
+		<p class="p-6 text-center text-xl text-red-400">Error: {error}</p>
+	{:else if !fullProjectData || (nodes.length === 0 && currentDirectoryId === fullProjectData?.rootDirectory?.id && fullProjectData?.rootDirectory?.childDirectoryNodes.length === 0 && fullProjectData?.rootDirectory?.childFileNodes.length === 0)}
+		<div class="bg-opacity-80 absolute top-0 left-0 z-20 rounded-br-lg bg-gray-700 p-4">
+			<p class="mb-1 text-lg font-semibold">Current: {currentPathDisplay}</p>
+			{#if isNotRoot}
+				<button
+					onclick={goUp}
+					class="rounded-md bg-blue-600 px-4 py-2 font-medium text-white shadow-md transition-colors hover:bg-blue-700"
+				>
+					Go Up
+				</button>
+			{/if}
+		</div>
+		<p class="p-6 pt-20 text-center text-xl text-gray-400">Project root is empty.</p>
+		<SvelteFlow {nodes} {edges} fitView minZoom={0.1} maxZoom={2}>
+			<Background gap={20} />
+		</SvelteFlow>
 	{:else if nodes.length === 0}
-		<p class="p-4 text-center text-gray-500">
-			No project structure data to display. Ensure the API endpoint is working and returns data.
-		</p>
+		<p class="p-6 text-center text-xl text-gray-400">No items to display in this directory.</p>
+		<div class="bg-opacity-80 absolute top-0 left-0 z-20 rounded-br-lg bg-gray-700 p-4">
+			<p class="mb-1 text-lg font-semibold">Current: {currentPathDisplay}</p>
+			{#if isNotRoot}
+				<button
+					onclick={goUp}
+					class="rounded-md bg-blue-600 px-4 py-2 font-medium text-white shadow-md transition-colors hover:bg-blue-700"
+				>
+					Go Up
+				</button>
+			{/if}
+		</div>
+		<SvelteFlow {nodes} {edges} fitView minZoom={0.1} maxZoom={2}>
+			<Background gap={20} />
+		</SvelteFlow>
 	{:else}
-		<SvelteFlow bind:nodes bind:edges fitView>
-			<Background />
+		<div class="bg-opacity-80 absolute top-0 left-0 z-20 rounded-br-lg bg-gray-700 p-4">
+			<p class="mb-1 text-lg font-semibold">Current: {currentPathDisplay}</p>
+			{#if isNotRoot}
+				<button
+					onclick={goUp}
+					class="rounded-md bg-blue-600 px-4 py-2 font-medium text-white shadow-md transition-colors hover:bg-blue-700"
+				>
+					Go Up
+				</button>
+			{/if}
+		</div>
+		<SvelteFlow
+			bind:nodes
+			bind:edges
+			onnodeclick={onNodeClick}
+			fitView
+			minZoom={0.1}
+			maxZoom={2}
+			elementsSelectable={true}
+			nodesDraggable={true}
+			nodesConnectable={false}
+		>
+			<Background gap={20} />
 		</SvelteFlow>
 	{/if}
 </div>

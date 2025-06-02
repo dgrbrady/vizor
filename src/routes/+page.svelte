@@ -1,5 +1,8 @@
 <script lang="ts">
+	import { SvelteFlowProvider } from '@xyflow/svelte';
 	import CodeGraph from '$lib/components/CodeGraph.svelte';
 </script>
 
-<CodeGraph />
+<SvelteFlowProvider>
+	<CodeGraph />
+</SvelteFlowProvider>
