@@ -46,6 +46,7 @@
 		]
 	},
 	"dependencies": {
-		"@xyflow/svelte": "^1.0.2"
+		"@xyflow/svelte": "^1.0.2",
+		"uuid": "^11.1.0"
 	}
 }
